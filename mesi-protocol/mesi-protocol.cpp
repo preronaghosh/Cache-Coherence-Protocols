@@ -5,6 +5,8 @@
 // Define Cache Line States
 enum class State {
     Modified,
+    Exclusive,
+    Shared,
     Invalid
 };
 
@@ -16,9 +18,9 @@ struct CacheLine {
 
 // Bus operations
 enum class BusOp {
-    GetS,
-    GetM,
-    PutM
+    BusRd,
+    BusRdX,
+    BusUpgr
 };
 
 class Cache;
@@ -36,6 +38,7 @@ public:
 
     // Broadcast a bus operation to all caches
     void broadcast(BusOp operation, int address, int originId);
+
 };
 
 // Cache class
@@ -44,19 +47,20 @@ private:
     std::unordered_map<int, CacheLine> cacheLines; // Cache lines with their states
     Bus* bus;
     int id; // Unique identifier for each cache
+    friend class Bus;
 
 public:
     Cache(int id, Bus* bus) : id{id}, bus{bus} {}
 
     // Function to process a read operation
     void read(int address) {
-        if (cacheLines.count(address) && cacheLines[address].state == State::Modified) {
+        if (cacheLines.count(address) && (cacheLines[address].state == State::Modified || cacheLines[address].state == State::Exclusive || cacheLines[address].state == State::Shared)) {
             std::cout << "Cache " << id << ": Read Hit for address " << address << std::endl;
         } else {
             std::cout << "Cache " << id << ": Read Miss for address " << address << std::endl;
-            bus->broadcast(BusOp::GetS, address, id);
-            // Load the cache line and set it to invalid
-            cacheLines[address] = {0, State::Invalid};
+            bus->broadcast(BusOp::BusRd, address, id);
+            // If no other cache has the data, mark as Exclusive, otherwise mark as Shared
+            cacheLines[address] = {0, State::Exclusive};
         }
     }
 
@@ -65,9 +69,13 @@ public:
         if (cacheLines.count(address) && cacheLines[address].state == State::Modified) {
             std::cout << "Cache " << id << ": Write Hit for address " << address << std::endl;
             cacheLines[address].data = value;
+        } else if (cacheLines.count(address) && (cacheLines[address].state == State::Shared || cacheLines[address].state == State::Exclusive)) {
+            std::cout << "Cache " << id << ": Write Miss for address " << address << std::endl;
+            bus->broadcast(BusOp::BusUpgr, address, id);
+            cacheLines[address] = {value, State::Modified};
         } else {
             std::cout << "Cache " << id << ": Write Miss for address " << address << std::endl;
-            bus->broadcast(BusOp::GetM, address, id);
+            bus->broadcast(BusOp::BusRdX, address, id);
             cacheLines[address] = {value, State::Modified};
         }
     }
@@ -94,13 +102,17 @@ public:
         if (!cacheLines.count(address)) return;
 
         switch (operation) {
-            case BusOp::GetS:
-                // Another core wants to share, downgrade if Modified
+            case BusOp::BusRd:
+                // Another core wants to read, downgrade if Modified or Exclusive
                 if (cacheLines[address].state == State::Modified) {
                     putM(address);
+                    cacheLines[address].state = State::Shared;
+                } else if (cacheLines[address].state == State::Exclusive) {
+                    cacheLines[address].state = State::Shared;
                 }
                 break;
-            case BusOp::GetM:
+            case BusOp::BusRdX:
+            case BusOp::BusUpgr:
                 // Another core wants to modify, invalidate if present
                 invalidate(address);
                 break;
@@ -114,16 +126,38 @@ public:
     int getId() const {
         return id;
     }
+
+    // Getter method for cacheLines
+    const std::unordered_map<int, CacheLine>& getCacheLines() const {
+        return cacheLines;
+    }
 };
 
 // Define the broadcast method after the Cache class is fully defined
 void Bus::broadcast(BusOp operation, int address, int originId) {
+    bool isShared = false;
     for (auto cache : caches) {
         if (cache->getId() != originId) {
             cache->snoop(operation, address);
+            // Access cacheLines using the getter method
+            const auto& cacheLines = cache->getCacheLines();
+            if (cacheLines.count(address) && cacheLines.at(address).state == State::Shared) {
+                isShared = true;
+            }
+        }
+    }
+    // Update the state of the requesting cache line if necessary
+    if (operation == BusOp::BusRd) {
+        for (auto cache : caches) {
+            // Access cacheLines using the getter method
+            const auto& cacheLines = cache->getCacheLines();
+            if (cache->getId() == originId && cacheLines.count(address)) {
+                cache->cacheLines[address].state = isShared ? State::Shared : State::Exclusive;
+            }
         }
     }
 }
+
 
 // Main function to simulate the caches and bus
 int main() {

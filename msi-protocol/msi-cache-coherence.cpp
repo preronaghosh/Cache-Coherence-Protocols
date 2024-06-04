@@ -5,6 +5,7 @@
 // Define Cache Line States
 enum class State {
     Modified,
+    Shared,
     Invalid
 };
 
@@ -16,9 +17,9 @@ struct CacheLine {
 
 // Bus operations
 enum class BusOp {
-    GetS,
-    GetM,
-    PutM
+    BusRd,
+    BusRdX,
+    BusUpgr
 };
 
 class Cache;
@@ -50,13 +51,13 @@ public:
 
     // Function to process a read operation
     void read(int address) {
-        if (cacheLines.count(address) && cacheLines[address].state == State::Modified) {
+        if (cacheLines.count(address) && (cacheLines[address].state == State::Modified || cacheLines[address].state == State::Shared)) {
             std::cout << "Cache " << id << ": Read Hit for address " << address << std::endl;
         } else {
             std::cout << "Cache " << id << ": Read Miss for address " << address << std::endl;
-            bus->broadcast(BusOp::GetS, address, id);
-            // Load the cache line and set it to invalid
-            cacheLines[address] = {0, State::Invalid};
+            bus->broadcast(BusOp::BusRd, address, id);
+            // Load the cache line and set it to shared
+            cacheLines[address] = {0, State::Shared};
         }
     }
 
@@ -65,9 +66,13 @@ public:
         if (cacheLines.count(address) && cacheLines[address].state == State::Modified) {
             std::cout << "Cache " << id << ": Write Hit for address " << address << std::endl;
             cacheLines[address].data = value;
+        } else if (cacheLines.count(address) && cacheLines[address].state == State::Shared) {
+            std::cout << "Cache " << id << ": Write Miss for address " << address << std::endl;
+            bus->broadcast(BusOp::BusUpgr, address, id);
+            cacheLines[address] = {value, State::Modified};
         } else {
             std::cout << "Cache " << id << ": Write Miss for address " << address << std::endl;
-            bus->broadcast(BusOp::GetM, address, id);
+            bus->broadcast(BusOp::BusRdX, address, id);
             cacheLines[address] = {value, State::Modified};
         }
     }
@@ -94,13 +99,15 @@ public:
         if (!cacheLines.count(address)) return;
 
         switch (operation) {
-            case BusOp::GetS:
-                // Another core wants to share, downgrade if Modified
+            case BusOp::BusRd:
+                // Another core wants to read, downgrade if Modified
                 if (cacheLines[address].state == State::Modified) {
                     putM(address);
+                    cacheLines[address].state = State::Shared;
                 }
                 break;
-            case BusOp::GetM:
+            case BusOp::BusRdX:
+            case BusOp::BusUpgr:
                 // Another core wants to modify, invalidate if present
                 invalidate(address);
                 break;
